@@ -112,16 +112,19 @@ export const productService = {
     return data;
   },
 
-  // Create new product
   async createProduct(product: ProductInsert) {
     const { data, error } = await supabase
       .from('products')
       .insert(product)
       .select()
-      .single();
+      .maybeSingle();
 
     if (error) {
       throw new Error(error.message);
+    }
+
+    if (!data) {
+      throw new Error('Failed to create product');
     }
 
     return data;

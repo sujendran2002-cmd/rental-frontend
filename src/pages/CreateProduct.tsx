@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ArrowLeft, Upload, MapPin, DollarSign, Package } from 'lucide-react';
+import { ArrowLeft, Upload, MapPin, DollarSign, Package, Loader2 } from 'lucide-react';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { Label } from '../components/ui/label';
@@ -12,6 +12,8 @@ import { useToast } from '../hooks/use-toast';
 import { useAppSelector, useAppDispatch } from '../hooks';
 import { setProducts } from '../store/slices/productsSlice';
 import { categories } from '../data/products';
+import { productService } from '../services/productService';
+import { supabase } from '../lib/supabase';
 
 export const CreateProduct = () => {
   const navigate = useNavigate();
@@ -39,6 +41,9 @@ export const CreateProduct = () => {
 
   const [selectedFeatures, setSelectedFeatures] = useState<string[]>([]);
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [imageFiles, setImageFiles] = useState<File[]>([]);
+  const [imagePreviews, setImagePreviews] = useState<string[]>([]);
 
   const handleInputChange = (field: string, value: string) => {
     setFormData(prev => ({ ...prev, [field]: value }));
@@ -66,7 +71,64 @@ export const CreateProduct = () => {
     setSelectedTags(prev => prev.filter(t => t !== tag));
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleImageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files) return;
+
+    const fileArray = Array.from(files);
+    setImageFiles(prev => [...prev, ...fileArray]);
+
+    fileArray.forEach(file => {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        setImagePreviews(prev => [...prev, reader.result as string]);
+      };
+      reader.readAsDataURL(file);
+    });
+  };
+
+  const removeImage = (index: number) => {
+    setImageFiles(prev => prev.filter((_, i) => i !== index));
+    setImagePreviews(prev => prev.filter((_, i) => i !== index));
+  };
+
+  const uploadImages = async (): Promise<string[]> => {
+    if (imageFiles.length === 0) {
+      return ['https://images.pexels.com/photos/3394650/pexels-photo-3394650.jpeg?auto=compress&cs=tinysrgb&w=800'];
+    }
+
+    const imageUrls: string[] = [];
+
+    try {
+      for (const file of imageFiles) {
+        const fileExt = file.name.split('.').pop();
+        const fileName = `${user!.id}-${Date.now()}-${Math.random().toString(36).substring(7)}.${fileExt}`;
+        const filePath = `products/${fileName}`;
+
+        const { error: uploadError } = await supabase.storage
+          .from('product-images')
+          .upload(filePath, file);
+
+        if (uploadError) {
+          console.warn('Storage upload error:', uploadError);
+          return ['https://images.pexels.com/photos/3394650/pexels-photo-3394650.jpeg?auto=compress&cs=tinysrgb&w=800'];
+        }
+
+        const { data: { publicUrl } } = supabase.storage
+          .from('product-images')
+          .getPublicUrl(filePath);
+
+        imageUrls.push(publicUrl);
+      }
+
+      return imageUrls.length > 0 ? imageUrls : ['https://images.pexels.com/photos/3394650/pexels-photo-3394650.jpeg?auto=compress&cs=tinysrgb&w=800'];
+    } catch (error) {
+      console.error('Image upload failed:', error);
+      return ['https://images.pexels.com/photos/3394650/pexels-photo-3394650.jpeg?auto=compress&cs=tinysrgb&w=800'];
+    }
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     
     if (!isAuthenticated || user?.role !== 'host') {
@@ -78,7 +140,6 @@ export const CreateProduct = () => {
       return;
     }
 
-    // Validate required fields
     if (!formData.name || !formData.description || !formData.category || !formData.price) {
       toast({
         title: "Missing Information",
@@ -88,48 +149,54 @@ export const CreateProduct = () => {
       return;
     }
 
-    // Mock product creation - in real app, this would be an API call
-    const newProduct = {
-      id: Date.now().toString(),
-      name: formData.name,
-      description: formData.description,
-      price: parseFloat(formData.price),
-      pricePerWeek: formData.pricePerWeek ? parseFloat(formData.pricePerWeek) : undefined,
-      pricePerMonth: formData.pricePerMonth ? parseFloat(formData.pricePerMonth) : undefined,
-      rating: 0,
-      reviewCount: 0,
-      image: 'https://images.pexels.com/photos/3394650/pexels-photo-3394650.jpeg?auto=compress&cs=tinysrgb&w=800',
-      category: formData.category,
-      inStock: true,
-      stockCount: parseInt(formData.stockCount),
-      tags: selectedTags,
-      location: {
-        lat: 40.7128,
-        lng: -74.0060,
-        address: formData.address,
-        city: formData.city,
-        country: formData.country
-      },
-      owner: {
-        id: user.id,
-        name: user.name,
-        avatar: user.avatar,
-        rating: 4.8
-      },
-      features: selectedFeatures,
-      minRentalDays: parseInt(formData.minRentalDays),
-      maxRentalDays: parseInt(formData.maxRentalDays)
-    };
+    setLoading(true);
 
-    // Add to products list
-    dispatch(setProducts([...products, newProduct]));
-    
-    toast({
-      title: "Product Created Successfully!",
-      description: "Your product has been added to the marketplace.",
-    });
+    try {
+      const imageUrls = await uploadImages();
 
-    navigate('/host/dashboard');
+      const productData = {
+        name: formData.name,
+        description: formData.description,
+        price: parseFloat(formData.price),
+        price_per_week: formData.pricePerWeek ? parseFloat(formData.pricePerWeek) : null,
+        price_per_month: formData.pricePerMonth ? parseFloat(formData.pricePerMonth) : null,
+        category: formData.category,
+        in_stock: true,
+        stock_count: parseInt(formData.stockCount),
+        min_rental_days: parseInt(formData.minRentalDays),
+        max_rental_days: parseInt(formData.maxRentalDays),
+        features: selectedFeatures,
+        tags: selectedTags,
+        images: imageUrls,
+        location_address: formData.address || null,
+        location_city: formData.city || null,
+        location_country: formData.country,
+        location_lat: null,
+        location_lng: null,
+        owner_id: user!.id,
+      };
+
+      await productService.createProduct(productData);
+
+      const updatedProducts = await productService.getProducts();
+      dispatch(setProducts(updatedProducts));
+
+      toast({
+        title: "Product Created Successfully!",
+        description: "Your product has been added to the marketplace.",
+      });
+
+      navigate('/host/dashboard');
+    } catch (error) {
+      console.error('Error creating product:', error);
+      toast({
+        title: "Error Creating Product",
+        description: error instanceof Error ? error.message : "An unexpected error occurred.",
+        variant: "destructive",
+      });
+    } finally {
+      setLoading(false);
+    }
   };
 
   if (!isAuthenticated || user?.role !== 'host') {
@@ -400,7 +467,6 @@ export const CreateProduct = () => {
           </CardContent>
         </Card>
 
-        {/* Images */}
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
@@ -408,26 +474,76 @@ export const CreateProduct = () => {
               Product Images
             </CardTitle>
           </CardHeader>
-          <CardContent>
+          <CardContent className="space-y-4">
             <div className="border-2 border-dashed border-muted-foreground/25 rounded-lg p-8 text-center">
               <Upload className="h-12 w-12 mx-auto mb-4 text-muted-foreground" />
               <h3 className="text-lg font-medium mb-2">Upload Product Images</h3>
               <p className="text-muted-foreground mb-4">
                 Add high-quality photos of your product. First image will be the main photo.
               </p>
-              <Button type="button" variant="outline">
+              <Input
+                id="image-upload"
+                type="file"
+                accept="image/*"
+                multiple
+                onChange={handleImageChange}
+                className="hidden"
+              />
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => document.getElementById('image-upload')?.click()}
+              >
                 Choose Files
               </Button>
             </div>
+
+            {imagePreviews.length > 0 && (
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                {imagePreviews.map((preview, index) => (
+                  <div key={index} className="relative group">
+                    <img
+                      src={preview}
+                      alt={`Preview ${index + 1}`}
+                      className="w-full h-32 object-cover rounded-lg"
+                    />
+                    <Button
+                      type="button"
+                      variant="destructive"
+                      size="sm"
+                      className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity"
+                      onClick={() => removeImage(index)}
+                    >
+                      Remove
+                    </Button>
+                    {index === 0 && (
+                      <Badge className="absolute bottom-2 left-2">Main Image</Badge>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
           </CardContent>
         </Card>
 
-        {/* Submit */}
         <div className="flex gap-4">
-          <Button type="submit" size="lg" className="flex-1">
-            Create Product
+          <Button type="submit" size="lg" className="flex-1" disabled={loading}>
+            {loading ? (
+              <>
+                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                Creating Product...
+              </>
+            ) : (
+              'Create Product'
+            )}
           </Button>
-          <Button type="button" variant="outline" size="lg" onClick={() => navigate('/host/dashboard')}>
+          <Button
+            type="button"
+            variant="outline"
+            size="lg"
+            onClick={() => navigate('/host/dashboard')}
+            disabled={loading}
+          >
             Cancel
           </Button>
         </div>
