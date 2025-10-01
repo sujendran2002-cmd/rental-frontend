@@ -9,40 +9,51 @@ export const useSupabase = () => {
   const dispatch = useAppDispatch();
 
   useEffect(() => {
+    let mounted = true;
+
     // Get initial session
     const getInitialSession = async () => {
+      if (!mounted) return;
       setLoading(true);
+
       try {
         const { data: { session } } = await supabase.auth.getSession();
-        
+
+        if (!mounted) return;
+
         if (session?.user) {
           await handleUserSession(session.user);
         }
       } catch (error) {
         console.error('Error getting initial session:', error);
       } finally {
-        setLoading(false);
+        if (mounted) {
+          setLoading(false);
+        }
       }
     };
 
     // Listen for auth changes
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
-      async (event, session) => {
-        try {
-          if (event === 'SIGNED_IN' && session?.user) {
-            await handleUserSession(session.user);
-          } else if (event === 'SIGNED_OUT') {
-            dispatch(logout());
+      (event, session) => {
+        (async () => {
+          try {
+            if (event === 'SIGNED_IN' && session?.user) {
+              await handleUserSession(session.user);
+            } else if (event === 'SIGNED_OUT') {
+              dispatch(logout());
+            }
+          } catch (error) {
+            console.error('Error handling auth state change:', error);
           }
-        } catch (error) {
-          console.error('Error handling auth state change:', error);
-        }
+        })();
       }
     );
 
     getInitialSession();
 
     return () => {
+      mounted = false;
       subscription.unsubscribe();
     };
   }, [dispatch]);
@@ -52,76 +63,70 @@ export const useSupabase = () => {
       // Calculate session expiry (30 days from now)
       const sessionExpiry = new Date();
       sessionExpiry.setDate(sessionExpiry.getDate() + 30);
-      
-      // Get user profile from database
-      const { data: profile, error } = await supabase
+
+      const defaultUserData = {
+        id: user.id,
+        name: user.user_metadata?.name || user.email?.split('@')[0] || 'User',
+        email: user.email || '',
+        avatar: user.user_metadata?.avatar_url,
+        role: 'renter' as const,
+        sessionExpiry: sessionExpiry.toISOString(),
+      };
+
+      // Add timeout to profile fetch (5 seconds)
+      const profilePromise = supabase
         .from('profiles')
         .select('*')
         .eq('id', user.id)
         .single();
 
-      if (error) {
-        // If profile doesn't exist, it might be a new user
-        if (error.code === 'PGRST116') {
-          // Profile not found, user might be newly created
-          console.log('Profile not found, user might be newly created');
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error('Profile fetch timeout')), 5000);
+      });
+
+      try {
+        const { data: profile, error } = await Promise.race([
+          profilePromise,
+          timeoutPromise,
+        ]) as { data: any; error: any };
+
+        if (error) {
+          // If profile doesn't exist or table doesn't exist, use default data
+          console.log('Profile fetch error:', error.code || error.message);
+          dispatch(loginSuccess(defaultUserData));
+          return;
+        }
+
+        if (profile) {
           dispatch(loginSuccess({
-            id: user.id,
-            name: user.user_metadata?.name || user.email?.split('@')[0] || 'User',
-            email: user.email || '',
-            avatar: user.user_metadata?.avatar_url,
-            role: 'renter', // Default role
-            sessionExpiry: sessionExpiry.toISOString(),
-          }));
-        } else if (error.code === 'PGRST205') {
-          // Table doesn't exist - database not set up
-          console.log('Database not set up, using basic user info');
-          dispatch(loginSuccess({
-            id: user.id,
-            name: user.user_metadata?.name || user.email?.split('@')[0] || 'User',
-            email: user.email || '',
-            avatar: user.user_metadata?.avatar_url,
-            role: 'renter', // Default role
+            id: profile.id,
+            name: profile.name,
+            email: profile.email,
+            avatar: profile.avatar_url || undefined,
+            role: profile.role,
+            kycStatus: profile.kyc_status,
             sessionExpiry: sessionExpiry.toISOString(),
           }));
         } else {
-          console.error('Error fetching profile:', error);
-          // Still allow basic login even if profile fetch fails
-          dispatch(loginSuccess({
-            id: user.id,
-            name: user.user_metadata?.name || user.email?.split('@')[0] || 'User',
-            email: user.email || '',
-            avatar: user.user_metadata?.avatar_url,
-            role: 'renter', // Default role
-            sessionExpiry: sessionExpiry.toISOString(),
-          }));
+          dispatch(loginSuccess(defaultUserData));
         }
-        return;
-      }
-
-      if (profile) {
-        dispatch(loginSuccess({
-          id: profile.id,
-          name: profile.name,
-          email: profile.email,
-          avatar: profile.avatar_url || undefined,
-          role: profile.role,
-          kycStatus: profile.kyc_status,
-          sessionExpiry: sessionExpiry.toISOString(),
-        }));
+      } catch (timeoutError) {
+        // Timeout or profile fetch failed, use default data
+        console.log('Profile fetch timed out or failed, using default data');
+        dispatch(loginSuccess(defaultUserData));
       }
     } catch (error) {
       console.error('Error handling user session:', error);
       // Fallback to basic user info if database operations fail
       const sessionExpiry = new Date();
       sessionExpiry.setDate(sessionExpiry.getDate() + 30);
-      
+
       dispatch(loginSuccess({
         id: user.id,
         name: user.user_metadata?.name || user.email?.split('@')[0] || 'User',
         email: user.email || '',
         avatar: user.user_metadata?.avatar_url,
-        role: 'renter', // Default role
+        role: 'renter',
         sessionExpiry: sessionExpiry.toISOString(),
       }));
     }
