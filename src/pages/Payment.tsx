@@ -10,6 +10,7 @@ import { Separator } from '../components/ui/separator';
 import { useToast } from '../hooks/use-toast';
 import { useAppSelector } from '../hooks';
 import { mockProducts } from '../data/products';
+import { createRazorpayOrder, initiateRazorpayPayment, verifyRazorpayPayment } from '../services/razorpayService';
 
 interface PaymentData {
   productId: string;
@@ -28,7 +29,7 @@ export const Payment = () => {
   const paymentData = location.state as PaymentData;
   const product = mockProducts.find(p => p.id === paymentData?.productId);
   
-  const [paymentMethod, setPaymentMethod] = useState('card');
+  const [paymentMethod, setPaymentMethod] = useState('razorpay');
   const [cardData, setCardData] = useState({
     number: '',
     expiry: '',
@@ -63,18 +64,74 @@ export const Payment = () => {
     }
 
     setProcessing(true);
-    
-    // Simulate payment processing
-    await new Promise(resolve => setTimeout(resolve, 2000));
-    
-    setProcessing(false);
-    
-    toast({
-      title: "Payment Successful!",
-      description: "Your rental has been confirmed. Check your rentals page for details.",
+
+    try {
+      if (paymentMethod === 'razorpay') {
+        await handleRazorpayPayment();
+      } else {
+        await new Promise(resolve => setTimeout(resolve, 2000));
+
+        toast({
+          title: "Payment Successful!",
+          description: "Your rental has been confirmed. Check your rentals page for details.",
+        });
+
+        navigate('/my-rentals');
+      }
+    } catch (error: any) {
+      toast({
+        title: "Payment Failed",
+        description: error.message || "An error occurred during payment processing.",
+        variant: "destructive",
+      });
+    } finally {
+      setProcessing(false);
+    }
+  };
+
+  const handleRazorpayPayment = async () => {
+    if (!paymentData || !product) return;
+
+    const totalAmount = paymentData.totalAmount * 1.07;
+    const amountInPaise = Math.round(totalAmount * 100);
+
+    const orderData = await createRazorpayOrder(amountInPaise, 'INR');
+
+    await initiateRazorpayPayment({
+      orderId: orderData.orderId,
+      amount: orderData.amount,
+      currency: orderData.currency,
+      name: 'Rental Payment',
+      description: `Rental payment for ${product.name}`,
+      onSuccess: async (response) => {
+        try {
+          const isVerified = await verifyRazorpayPayment(
+            response.razorpay_order_id,
+            response.razorpay_payment_id,
+            response.razorpay_signature
+          );
+
+          if (isVerified) {
+            toast({
+              title: "Payment Successful!",
+              description: "Your rental has been confirmed. Check your rentals page for details.",
+            });
+            navigate('/my-rentals');
+          } else {
+            throw new Error('Payment verification failed');
+          }
+        } catch (error: any) {
+          toast({
+            title: "Verification Failed",
+            description: error.message || "Payment verification failed. Please contact support.",
+            variant: "destructive",
+          });
+        }
+      },
+      onFailure: (error) => {
+        throw new Error(error.description || 'Payment failed');
+      },
     });
-    
-    navigate('/my-rentals');
   };
 
   if (!isAuthenticated) {
@@ -216,17 +273,23 @@ export const Payment = () => {
             <CardContent className="space-y-4">
               <RadioGroup value={paymentMethod} onValueChange={setPaymentMethod}>
                 <div className="flex items-center space-x-2 p-3 border rounded-lg">
+                  <RadioGroupItem value="razorpay" id="razorpay" />
+                  <Wallet className="h-4 w-4" />
+                  <Label htmlFor="razorpay" className="flex-1">Razorpay (UPI, Cards, Netbanking)</Label>
+                </div>
+
+                <div className="flex items-center space-x-2 p-3 border rounded-lg">
                   <RadioGroupItem value="card" id="card" />
                   <CreditCard className="h-4 w-4" />
                   <Label htmlFor="card" className="flex-1">Credit/Debit Card</Label>
                 </div>
-                
+
                 <div className="flex items-center space-x-2 p-3 border rounded-lg">
                   <RadioGroupItem value="paypal" id="paypal" />
                   <Wallet className="h-4 w-4" />
                   <Label htmlFor="paypal" className="flex-1">PayPal</Label>
                 </div>
-                
+
                 <div className="flex items-center space-x-2 p-3 border rounded-lg">
                   <RadioGroupItem value="apple" id="apple" />
                   <Smartphone className="h-4 w-4" />
